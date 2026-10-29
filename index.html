@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>等高線變 3D 地形</title>
+<style>
+:root{--bg:#f6f4ee;--fg:#222;--card:#fff;--line:#d8d3c4;--acc:#2f7d5b;--ok:#1f8a4c;--no:#d03a3a;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1d1a;--fg:#eee;--card:#262925;--line:#3b3f38;--acc:#5fc496;--ok:#55d68a;--no:#ff7b7b}}
+:root[data-theme="dark"]{--bg:#1b1d1a;--fg:#eee;--card:#262925;--line:#3b3f38;--acc:#5fc496;--ok:#55d68a;--no:#ff7b7b}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,"Noto Sans TC","PingFang TC",sans-serif}
+.wrap{max-width:1000px;margin:auto;padding:12px}
+h1{font-size:20px;margin:4px 0}
+p.s{margin:0 0 10px;font-size:14px;opacity:.8}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px}
+#d{width:100%;aspect-ratio:1;touch-action:none;display:block;border-radius:8px;background:var(--bg);cursor:crosshair}
+#v{width:100%;aspect-ratio:1;border-radius:8px;overflow:hidden;background:linear-gradient(#bfe0f0,#eaf5ee)}
+#v canvas{display:block;touch-action:none}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;font-size:14px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:6px 10px;cursor:pointer}
+button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+.lv{min-width:42px;padding:6px 4px;font-size:12px;font-weight:700;color:#222}
+.lv.on{outline:3px solid var(--acc)}
+#msg{min-height:20px;margin-top:6px;font-size:14px;color:var(--no);font-weight:600}
+#ms{list-style:none;margin:6px 0 0;padding:0;font-size:15px}
+#ms li{padding:3px 0;font-weight:600}.ok{color:var(--ok)}.no{color:var(--no)}
+</style></head><body><div class="wrap">
+<h1>⛰️ 等高線變 3D 地形</h1>
+<p class="s">選高度（0～1000 公尺），畫一圈封閉的線：外圈低、內圈高。線不能交叉（重疊可以）！右邊拖曳可旋轉，滾輪可縮放。</p>
+<div class="grid">
+<div class="card"><canvas id="d"></canvas>
+<div class="row"><span id="lvs" class="row" style="margin:0"></span></div>
+<div class="row"><button id="undo">↩︎ 復原</button><button id="clr">🗑 清除</button><button id="ex">✨ 範例</button></div>
+<div id="msg"></div></div>
+<div class="card"><div id="v"></div>
+<div class="row"><button id="m1" class="on">平滑地形</button><button id="m2">紙板層疊（實體模型）</button></div>
+<div class="row"><label>🌊 水位 <input id="w" type="range" min="0" max="1000" step="50" value="0"></label><b id="wl"></b></div>
+<div class="row"><label>高度倍率 <input id="k" type="range" min="0.4" max="2" step="0.1" value="1"></label></div></div>
+</div>
+<div class="card" style="margin-top:12px"><b>🎯 紅綠任務</b> <button id="g1" class="on">中年級</button> <button id="g2">高年級</button><ul id="ms"></ul></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const N=64,S=480,M=32,W=10;
+const stops=[[.5,.75,.48],[.71,.84,.42],[.9,.84,.36],[.85,.64,.25],[.66,.45,.31],[.55,.43,.39],[.96,.96,.96]];
+const col=h=>{const t=Math.max(0,Math.min(6,h*.6)),i=Math.min(5,Math.floor(t)),f=t-i,a=stops[i],b=stops[i+1];
+  return[a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f,a[2]+(b[2]-a[2])*f]};
+const css=h=>`rgb(${col(h).map(v=>Math.round(v*255))})`;
+const $=s=>document.querySelector(s);
+const cv=$('#d'),cx=cv.getContext('2d');cv.width=cv.height=S;
+let grade=1,strokes=[],lv=3,cur=null,H=new Float32Array(N*N),ex=1,water=0,mt;
+
+for(let i=0;i<=10;i++){const b=document.createElement('button');b.className='lv'+(i===lv?' on':'');b.textContent=i*100;b.style.background=css(i);
+  b.onclick=()=>{lv=i;document.querySelectorAll('.lv').forEach(x=>x.classList.remove('on'));b.classList.add('on')};$('#lvs').appendChild(b)}
+function msg(t){$('#msg').textContent=t;clearTimeout(mt);if(t)mt=setTimeout(()=>$('#msg').textContent='',4000)}
+
+function draw(){
+  cx.clearRect(0,0,S,S);cx.lineCap=cx.lineJoin='round';
+  cx.strokeStyle='rgba(120,120,120,.18)';cx.lineWidth=1;
+  for(let i=1;i<8;i++){cx.beginPath();cx.moveTo(i*S/8,0);cx.lineTo(i*S/8,S);cx.moveTo(0,i*S/8);cx.lineTo(S,i*S/8);cx.stroke()}
+  cx.font='bold 13px system-ui';
+  for(const s of strokes){
+    cx.beginPath();s.p.forEach((q,i)=>i?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1]));
+    cx.strokeStyle='rgba(0,0,0,.4)';cx.lineWidth=5;cx.stroke();
+    cx.strokeStyle=css(s.l);cx.lineWidth=3;cx.stroke();
+    const t=String(s.l*100),q=s.p[0];cx.lineWidth=3;cx.strokeStyle='rgba(0,0,0,.7)';cx.strokeText(t,q[0]+6,q[1]-6);cx.fillStyle='#fff';cx.fillText(t,q[0]+6,q[1]-6);
+  }
+  if(cur){const q=cur.p[0];cx.beginPath();cx.arc(q[0],q[1],14,0,7);cx.strokeStyle='#e53935';cx.lineWidth=2;cx.setLineDash([4,3]);cx.stroke();cx.setLineDash([])}
+}
+
+// geometry checks: closed + no crossing / overlap
+const cr=(a,b,c)=>(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
+const pd=(p,a,b)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=dx*dx+dy*dy||1,t=Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L));return Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy)};
+const near=(a,b,c,d)=>cr(a,b,c)*cr(a,b,d)<0&&cr(c,d,a)*cr(c,d,b)<0;
+function bad(s){const p=s.p,m=p.length-1;
+  for(let i=0;i<m;i++)for(let j=i+1;j<m;j++){const d=Math.min(j-i,m-(j-i));if(d>1&&near(p[i],p[i+1],p[j],p[j+1]))return true}
+  for(const o of strokes){if(o===s)continue;const q=o.p;for(let i=0;i<m;i++)for(let j=0;j<q.length-1;j++)if(near(p[i],p[i+1],q[j],q[j+1]))return true}
+  return false}
+const inP=(pt,p)=>{let c=false;for(let i=0,j=p.length-1;i<p.length;j=i++)if((p[i][1]>pt[1])!=(p[j][1]>pt[1])&&pt[0]<(p[j][0]-p[i][0])*(pt[1]-p[i][1])/(p[j][1]-p[i][1])+p[i][0])c=!c;return c};
+
+const pos=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)/r.width*S,(e.clientY-r.top)/r.height*S]};
+cv.onpointerdown=e=>{cv.setPointerCapture(e.pointerId);cur={l:lv,p:[pos(e)]};strokes.push(cur);draw()};
+cv.onpointermove=e=>{if(!cur)return;const q=pos(e),a=cur.p.at(-1);if(Math.hypot(q[0]-a[0],q[1]-a[1])>=5){cur.p.push(q);draw()}};
+cv.onpointerup=()=>{if(!cur)return;const s=cur,p=s.p;cur=null;
+  if(p.length<8||Math.hypot(p[0][0]-p.at(-1)[0],p[0][1]-p.at(-1)[1])>40){strokes.pop();msg('❌ 要畫成封閉曲線：把線頭接回紅色虛線圈的起點');draw();return}
+  p.push(p[0]);
+  if(bad(s)){strokes.pop();msg('❌ 等高線不能和別條線（或自己）交叉（重疊、碰到可以）');draw();return}
+  msg('');draw();build()};
+$('#undo').onclick=()=>{strokes.pop();draw();build()};
+$('#clr').onclick=()=>{strokes=[];draw();build()};
+$('#ex').onclick=()=>{strokes=[];
+  [1,3,5,7,9].forEach((l,k)=>{const r=S*(.4-.075*k),x0=S/2+k*8,y0=S/2-k*6,p=[];
+    for(let a=0;a<40;a++){const t=a/40*Math.PI*2,w=1+.1*Math.sin(3*t)+.06*Math.cos(5*t);p.push([x0+Math.cos(t)*r*w,y0+Math.sin(t)*r*.85*w])}
+    p.push(p[0]);strokes.push({l,p})});
+  draw();build()};
+
+// contour lines -> height grid
+function build(){
+  const F=new Uint8Array(N*N);
+  let sum=0;for(const s of strokes)sum+=s.l;H.fill(strokes.length?sum/strokes.length:0);
+  for(let i=0;i<N;i++)for(const j of[0,N-1]){F[i*N+j]=1;F[j*N+i]=1;H[i*N+j]=0;H[j*N+i]=0}
+  const mark=(x,y,l)=>{if(x<0||y<0||x>=N||y>=N)return;const i=y*N+x;F[i]=1;H[i]=l};
+  for(const s of strokes)for(let a=0;a<s.p.length-1;a++){
+    const A=s.p[a],B=s.p[a+1],ax=A[0]/S*(N-1),ay=A[1]/S*(N-1),bx=B[0]/S*(N-1),by=B[1]/S*(N-1);
+    const n=Math.max(1,Math.ceil(Math.hypot(bx-ax,by-ay)*2));
+    for(let t=0;t<=n;t++){const x=Math.round(ax+(bx-ax)*t/n),y=Math.round(ay+(by-ay)*t/n);mark(x,y,s.l);mark(x+1,y,s.l);mark(x,y+1,s.l)}
+  }
+  if(strokes.length){
+    for(let it=0;it<700;it++)for(let y=1;y<N-1;y++)for(let x=1;x<N-1;x++){const i=y*N+x;if(F[i])continue;H[i]+=1.8*((H[i-1]+H[i+1]+H[i-N]+H[i+N])/4-H[i])}
+    for(let p=0;p<2;p++){const T=H.slice();for(let y=1;y<N-1;y++)for(let x=1;x<N-1;x++){const i=y*N+x;H[i]=(T[i]*4+T[i-1]+T[i+1]+T[i-N]+T[i+N])/8}}
+  }
+  update3D();
+}
+
+// 3D scene
+const scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(40,1,.1,100);
+const ren=new THREE.WebGLRenderer({antialias:true,alpha:true});
+ren.setPixelRatio(Math.min(devicePixelRatio,2));$('#v').appendChild(ren.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff,0x778877,.85));
+const dl=new THREE.DirectionalLight(0xffffff,.8);dl.position.set(5,10,6);scene.add(dl);
+const geo=new THREE.PlaneGeometry(W,W,N-1,N-1);geo.rotateX(-Math.PI/2);
+geo.setAttribute('color',new THREE.BufferAttribute(new Float32Array(N*N*3),3));
+const smooth=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({vertexColors:true}));scene.add(smooth);
+const blocks=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshLambertMaterial(),M*M*11);
+blocks.visible=false;scene.add(blocks);
+const sea=new THREE.Mesh(new THREE.PlaneGeometry(W,W).rotateX(-Math.PI/2),new THREE.MeshLambertMaterial({color:0x2f86d6,transparent:true,opacity:.6,depthWrite:false}));
+sea.visible=false;scene.add(sea);
+const dm=new THREE.Object3D(),cc=new THREE.Color();
+function update3D(){
+  const k=.36*ex,P=geo.attributes.position,C=geo.attributes.color;
+  for(let i=0;i<N*N;i++){P.setY(i,H[i]*k);const c=col(H[i]);C.setXYZ(i,c[0],c[1],c[2])}
+  P.needsUpdate=C.needsUpdate=true;geo.computeVertexNormals();
+  let n=0;const bw=W/M;
+  for(let by=0;by<M;by++)for(let bx=0;bx<M;bx++){
+    const i=by*2*N+bx*2,h=Math.max(0,Math.round((H[i]+H[i+1]+H[i+N]+H[i+N+1])/4));
+    for(let j=0;j<=h;j++){
+      dm.position.set(-W/2+(bx+.5)*bw,(j+.5)*k,-W/2+(by+.5)*bw);dm.scale.set(bw,k*.92,bw);dm.updateMatrix();
+      blocks.setMatrixAt(n,dm.matrix);const c=col(j);cc.setRGB(c[0]*.92,c[1]*.92,c[2]*.92);blocks.setColorAt(n,cc);n++}
+  }
+  blocks.count=n;blocks.instanceMatrix.needsUpdate=true;if(blocks.instanceColor)blocks.instanceColor.needsUpdate=true;
+  upWater();
+}
+// water level + missions
+function upWater(){
+  sea.visible=water>0;sea.position.y=water/100*.36*ex+.01;
+  const fl=Math.round(100*H.reduce((a,h)=>a+(h*100<water?1:0),0)/(N*N));
+  $('#wl').textContent=`${water} m・淹水 ${fl}%`;
+  const mx=strokes.reduce((a,s)=>Math.max(a,s.l),-1);
+  let dep=false;for(const A of strokes)for(const B of strokes)if(A!==B&&B.l<A.l&&inP(B.p[0],A.p))dep=true;
+  const lo=strokes.length,area=p=>{let a=0;for(let i=0;i<p.length-1;i++)a+=p[i][0]*p[i+1][1]-p[i+1][0]*p[i][1];return Math.abs(a)/2};
+  let peaks=0,gentle=lo>=3;
+  for(const A of strokes){if(A.l>=5&&!strokes.some(O=>O!==A&&inP(O.p[0],A.p)))peaks++;
+    let par=null;for(const B of strokes)if(B!==A&&inP(A.p[0],B.p)&&(!par||area(B.p)<area(par.p)))par=B;
+    if(par&&Math.abs(A.l-par.l)>2)gentle=false}
+  const L=grade===1?[[lo>=3,'至少畫 3 條封閉等高線'],[mx>=5,'畫出最高點 500 m 以上的山'],[strokes.some(s=>s.l===0),'畫一條 0 m 的海岸線'],[water>=200&&fl>0,'把水位調到 200 m 以上，看看哪裡被淹']]:[[lo>=5,'至少畫 5 條封閉等高線'],[mx>=8,'畫出最高點 800 m 以上的高山'],[dep,'畫出火山口或盆地（內圈比外圈低）'],[water===300&&fl>=20&&fl<=50,'水位調到 300 m，淹水 20%～50%（做出島和湖）'],[peaks>=2,'畫出兩座山峰（兩個 500 m 以上的山頂）'],[gentle,'緩坡挑戰：每一圈和外圈高度差不超過 200 m（至少 3 條）']];
+  $('#ms').innerHTML=L.map(([ok,t])=>`<li class="${ok?'ok':'no'}">${ok?'✅':'❌'} ${t}</li>`).join('');
+}
+$('#w').oninput=e=>{water=+e.target.value;upWater()};
+const sg=g=>{grade=g;$('#g1').classList.toggle('on',g===1);$('#g2').classList.toggle('on',g===2);upWater()};$('#g1').onclick=()=>sg(1);$('#g2').onclick=()=>sg(2);
+function setMode(m){smooth.visible=m===1;blocks.visible=m===2;$('#m1').classList.toggle('on',m===1);$('#m2').classList.toggle('on',m===2)}
+$('#m1').onclick=()=>setMode(1);$('#m2').onclick=()=>setMode(2);
+$('#k').oninput=e=>{ex=+e.target.value;update3D()};
+
+// camera orbit
+let th=.8,ph=1,dist=17,auto=true,drag=null;
+const el=ren.domElement;
+el.onpointerdown=e=>{el.setPointerCapture(e.pointerId);drag=[e.clientX,e.clientY];auto=false};
+el.onpointermove=e=>{if(!drag)return;th-=(e.clientX-drag[0])*.01;ph=Math.max(.2,Math.min(1.5,ph-(e.clientY-drag[1])*.01));drag=[e.clientX,e.clientY]};
+el.onpointerup=()=>drag=null;
+el.addEventListener('wheel',e=>{e.preventDefault();dist=Math.max(8,Math.min(30,dist+e.deltaY*.01))},{passive:false});
+new ResizeObserver(()=>{const w=$('#v').clientWidth;ren.setSize(w,w);cam.aspect=1;cam.updateProjectionMatrix()}).observe($('#v'));
+(function loop(){requestAnimationFrame(loop);if(auto)th+=.003;
+  cam.position.set(dist*Math.sin(ph)*Math.cos(th),1+dist*Math.cos(ph),dist*Math.sin(ph)*Math.sin(th));
+  cam.lookAt(0,1,0);ren.render(scene,cam)})();
+
+$('#ex').click();
+</script></body></html>
